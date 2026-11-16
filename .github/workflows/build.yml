@@ -14,6 +14,10 @@ on:
         description: The codename of the one device to build for; every device when empty
         required: false
         default: ""
+      stock:
+        description: A stock image to build on, for a device whose configuration names no stock build
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -96,12 +100,22 @@ jobs:
       - id: list
         env:
           DEVICE: ${{ inputs.device }}
+          STOCK: ${{ inputs.stock }}
         run: |
           if [ -n "$DEVICE" ]; then
             test -f "devices/$DEVICE.toml"
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
           else
-            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+            # A device whose configuration names no stock build has no
+            # image to take a recovery out of, so one has to be given, and
+            # is then built on for every such device alike.
+            list=()
+            for config in devices/*.toml; do
+              if [ -n "$STOCK" ] || grep -q '^\[stock\]' "$config"; then
+                list+=("$(basename "$config" .toml)")
+              fi
+            done
+            echo "devices=$(printf '%s\n' "${list[@]}" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
           fi
 
   recovery:
@@ -122,9 +136,15 @@ jobs:
         run: chmod +x tools/skyward tools/skyward-pack
       - name: Read the stock build the recovery is made on
         id: stock
-        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" >> "$GITHUB_OUTPUT"
+        run: |
+          if grep -q '^\[stock\]' "devices/${{ matrix.device }}.toml"; then
+            tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=local" >> "$GITHUB_OUTPUT"
+          fi
       - name: Restore the stock recovery
         id: cache
+        if: steps.stock.outputs.recovery != ''
         uses: actions/cache@v6
         with:
           path: stock/recovery.img
@@ -132,9 +152,17 @@ jobs:
       # Only what the recovery partition takes is read of the package,
       # which is several gigabytes in all.
       - name: Take the recovery partition out of the stock package
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.stock.outputs.recovery != '' && steps.cache.outputs.cache-hit != 'true'
         run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" --out stock/recovery.img
+      - name: Take the stock image given to build on
+        if: steps.stock.outputs.recovery == '' && inputs.stock != ''
+        env:
+          STOCK: ${{ inputs.stock }}
+        run: |
+          mkdir -p stock
+          curl --fail --location --retry 3 --output stock/recovery.img "$STOCK"
       - name: Check the stock recovery
+        if: steps.stock.outputs.recovery != ''
         env:
           RECOVERY: ${{ steps.stock.outputs.recovery }}
         run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
