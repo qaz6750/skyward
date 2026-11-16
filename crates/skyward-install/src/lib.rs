@@ -60,7 +60,7 @@ pub const ENGINE_LOG: &str = "/skyward/run/update_engine.log";
 pub const SCRIPT_LOG: &str = "/skyward/run/install-script.log";
 
 /// What the screen asks of an install besides the package.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     /// This recovery goes back into the recovery partitions an install
     /// writes over.
@@ -68,6 +68,16 @@ pub struct Options {
     /// A zip with an install script runs only if it was signed with one of
     /// the keys the phone's updates are signed with.
     pub signed: bool,
+    /// The partition this recovery lives in, without the slot it is of:
+    /// `recovery` on most phones, and `boot` on the ones whose recovery is
+    /// their boot image.
+    pub recovery: String,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { keep: false, signed: false, recovery: "recovery".into() }
+    }
 }
 
 /// What the installer tells the screen, in the order it happens.
