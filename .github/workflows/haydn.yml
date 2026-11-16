@@ -100,14 +100,23 @@ jobs:
           sha256sum *.img > SHA256SUMS
           cat SHA256SUMS
           ls -l
-      # The image is flashed as it is, so it is handed out as it is.
-      - uses: actions/upload-artifact@v7
+      # The image is flashed as it is, so it is handed out as it is. An
+      # artifact that is not zipped holds one file, so each goes up on its
+      # own.
+      - name: Hand out the image
+        uses: actions/upload-artifact@v7
         with:
-          name: haydn-images
+          name: skyward-haydn-boot.img
+          path: out/skyward-haydn-boot.img
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+      - name: Hand out its checksum and how to flash it
+        uses: actions/upload-artifact@v7
+        with:
+          name: skyward-haydn-notes
           path: |
-            out/skyward-haydn-boot.img
             out/SHA256SUMS
             out/FLASH.txt
-          archive: false
           if-no-files-found: error
           retention-days: 7
