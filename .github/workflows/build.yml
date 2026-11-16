@@ -107,12 +107,14 @@ jobs:
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
           else
             # A device whose configuration names no stock build has no
-            # image to take a recovery out of, so one has to be given, and
-            # is then built on for every such device alike.
+            # image to take a recovery out of, so it is built on one kept
+            # beside its configuration, or on one given to build on for
+            # every such device alike.
             list=()
             for config in devices/*.toml; do
-              if [ -n "$STOCK" ] || grep -q '^\[stock\]' "$config"; then
-                list+=("$(basename "$config" .toml)")
+              device=$(basename "$config" .toml)
+              if [ -n "$STOCK" ] || grep -q '^\[stock\]' "$config" || [ -f "devices/$device/stock.img.gz" ]; then
+                list+=("$device")
               fi
             done
             echo "devices=$(printf '%s\n' "${list[@]}" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
@@ -154,13 +156,21 @@ jobs:
       - name: Take the recovery partition out of the stock package
         if: steps.stock.outputs.recovery != '' && steps.cache.outputs.cache-hit != 'true'
         run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" --out stock/recovery.img
-      - name: Take the stock image given to build on
-        if: steps.stock.outputs.recovery == '' && inputs.stock != ''
+      - name: Take the image to build on
+        if: steps.stock.outputs.recovery == ''
         env:
+          DEVICE: ${{ matrix.device }}
           STOCK: ${{ inputs.stock }}
         run: |
           mkdir -p stock
-          curl --fail --location --retry 3 --output stock/recovery.img "$STOCK"
+          if [ -f "devices/$DEVICE/stock.img.gz" ]; then
+            gzip -dc "devices/$DEVICE/stock.img.gz" > stock/recovery.img
+          elif [ -n "$STOCK" ]; then
+            curl --fail --location --retry 3 --output stock/recovery.img "$STOCK"
+          else
+            echo "::error::devices/$DEVICE.toml names no stock build and devices/$DEVICE keeps no image"
+            exit 1
+          fi
       - name: Check the stock recovery
         if: steps.stock.outputs.recovery != ''
         env:
