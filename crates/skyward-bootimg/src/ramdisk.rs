@@ -54,8 +54,26 @@ impl Ramdisk {
     pub fn decode(compressed: &[u8]) -> Result<Self> {
         let mut cpio = Vec::new();
         lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        Self::archive_entries(&cpio)
+    }
+
+    /// Unpack a packed newc archive in whichever way [`Compression`] says it
+    /// is compressed, and say which that was, so that it is packed the same
+    /// way again: a phone's own boot ramdisk is not always LZ4.
+    pub fn decode_any(packed: &[u8]) -> Result<(Self, Compression)> {
+        let compression = Compression::of(packed)?;
+        let mut cpio = Vec::new();
+        match compression {
+            Compression::Lz4Legacy => lz4_flex::frame::FrameDecoder::new(packed).read_to_end(&mut cpio).context("lz4 decode")?,
+            Compression::Gzip => flate2::read::MultiGzDecoder::new(packed).read_to_end(&mut cpio).context("gzip decode")?,
+        };
+        Ok((Self::archive_entries(&cpio)?, compression))
+    }
+
+    /// The entries of an unpacked newc archive.
+    fn archive_entries(cpio: &[u8]) -> Result<Self> {
         let mut entries = Vec::new();
-        let mut rest = Cursor::new(cpio.as_slice());
+        let mut rest = Cursor::new(cpio);
         loop {
             let mut r = NewcReader::new(rest).context("cpio entry")?;
             if r.entry().is_trailer() {
@@ -85,6 +103,21 @@ impl Ramdisk {
     /// unpacker reads no other LZ4 framing) at its highest compression.
     pub fn encode(&self) -> Result<Vec<u8>> {
         lz4_tool(&self.archive()?)
+    }
+
+    /// Pack as a newc archive compressed as `compression` says, which is how
+    /// the ramdisk this one came from was packed.
+    pub fn encode_as(&self, compression: Compression) -> Result<Vec<u8>> {
+        match compression {
+            Compression::Lz4Legacy => lz4_tool(&self.archive()?),
+            Compression::Gzip => {
+                let mut out = Vec::new();
+                let mut gz = flate2::write::GzEncoder::new(&mut out, flate2::Compression::best());
+                gz.write_all(&self.archive()?).context("gzip encode")?;
+                gz.finish().context("gzip encode")?;
+                Ok(out)
+            }
+        }
     }
 
     /// Pack as a newc archive, uncompressed.
@@ -250,6 +283,32 @@ fn set_time(path: &Path, mtime: u32) -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("give it its time");
     }
     Ok(())
+}
+
+/// How a packed ramdisk is compressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compression {
+    /// LZ4 in the legacy framing the kernel's initramfs unpacker reads, which
+    /// AOSP packs boot ramdisks with.
+    Lz4Legacy,
+    /// Gzip, as some phones' own boot ramdisks are.
+    Gzip,
+}
+
+/// Gzip's magic number, the first two bytes of every stream of it.
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+impl Compression {
+    /// How `packed` is compressed, by its first bytes.
+    pub fn of(packed: &[u8]) -> Result<Self> {
+        if packed.starts_with(&GZIP_MAGIC) {
+            Ok(Compression::Gzip)
+        } else if packed.starts_with(&LZ4_LEGACY_MAGIC.to_le_bytes()) {
+            Ok(Compression::Lz4Legacy)
+        } else {
+            bail!("a ramdisk packed in an unknown way, starting {:02x?}", &packed[..packed.len().min(4)])
+        }
+    }
 }
 
 /// The legacy LZ4 framing's magic number.
@@ -452,5 +511,21 @@ mod tests {
         assert_eq!((unzip.data.as_slice(), unzip.mode, unzip.gid), (b"recovery".as_slice(), S_IFLNK | 0o755, 2000));
         assert_eq!(back.entries.len(), count, "no second entry of the name");
         assert!(back.find("system/bin/ziptool").is_some(), "what it pointed to stays");
+    }
+
+    #[test]
+    fn a_gzip_packed_archive_reads_and_packs_as_gzip() {
+        let rd = Ramdisk { entries: vec![mine("system/bin/init", S_IFREG | 0o750, b"init")] };
+        let packed = rd.encode_as(Compression::Gzip).unwrap();
+        assert_eq!(Compression::of(&packed).unwrap(), Compression::Gzip, "a gzip stream is known by its magic number");
+        let (back, compression) = Ramdisk::decode_any(&packed).unwrap();
+        assert_eq!(compression, Compression::Gzip);
+        assert_eq!(back.find("system/bin/init").unwrap().data, b"init");
+        let lz4 = lz4_legacy(&rd.archive().unwrap());
+        assert_eq!(Compression::of(&lz4).unwrap(), Compression::Lz4Legacy);
+        let (from_lz4, compression) = Ramdisk::decode_any(&lz4).unwrap();
+        assert_eq!(compression, Compression::Lz4Legacy, "the framing stays what it was");
+        assert_eq!(from_lz4.find("system/bin/init").unwrap().data, b"init");
+        assert!(Compression::of(b"nope").is_err(), "no kind of archive");
     }
 }
