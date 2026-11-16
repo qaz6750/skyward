@@ -163,17 +163,23 @@ fn main() -> Result<()> {
             // 0; init lets a later line of a property file override an earlier
             // one. update_engine refuses a package built before the recovery
             // itself unless both of the last two are set; the recovery checks
-            // packages against the installed system instead. A ramdisk that
-            // starts the system as well is left as the phone built it: its
-            // properties are the system's too, and changing them would change
-            // how the system it boots behaves.
-            if !cfg.recovery.shares_boot_ramdisk {
-                let stock_props = &rd
+            // packages against the installed system instead.
+            //
+            // A recovery fills the build's version in from the installed
+            // system, so the ramdisk's own must go. A ramdisk that starts the
+            // system as well keeps them: the system reads them, and it still
+            // starts from this one when nothing asks for the recovery.
+            if !cfg.recovery.shares_boot_ramdisk || cfg.recovery.root_adb {
+                let stock_props = rd
                     .find(paths::PROP_DEFAULT)
                     .with_context(|| format!("{} is not in the ramdisk", paths::PROP_DEFAULT))?
-                    .data;
-                let mut props = without(stock_props, &BUILD_VERSION);
-                props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
+                    .data
+                    .clone();
+                let mut props = match cfg.recovery.shares_boot_ramdisk {
+                    true => stock_props,
+                    false => without(&stock_props, &BUILD_VERSION),
+                };
+                props.extend_from_slice(ROOT_ADB);
                 rd.replace(paths::PROP_DEFAULT, props)?;
             }
             img.ramdisk = rd.encode_as(compression)?;
@@ -253,6 +259,11 @@ fn partition_size(stock: &Path) -> Result<usize> {
 /// they say the wrong one, so they are left out here for the recovery to
 /// fill in from the installed system once it has that mounted.
 const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
+
+/// What lets adb in as root, without authorization, and lets
+/// update_engine install a package built before the one installed. It goes
+/// after the phone's own lines, which init lets a later line override.
+const ROOT_ADB: &[u8] = b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n";
 
 /// The scheduling profiles a recovery's programs look up by name. A
 /// recovery's cgroup setup mounts no controllers, so of all a system's

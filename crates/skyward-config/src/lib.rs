@@ -336,11 +336,17 @@ pub struct Recovery {
     /// recovery changes for itself the system then reads too.
     #[serde(default)]
     pub shares_boot_ramdisk: bool,
+    /// Whether the recovery's adb is root: its property file lets adbd keep
+    /// root and any computer in without authorization, and lets
+    /// update_engine install a package built before this recovery. A
+    /// ramdisk that also starts the system gives the system these too.
+    #[serde(default)]
+    pub root_adb: bool,
 }
 
 impl Default for Recovery {
     fn default() -> Self {
-        Self { partition: default_recovery_partition(), shares_boot_ramdisk: false }
+        Self { partition: default_recovery_partition(), shares_boot_ramdisk: false, root_adb: false }
     }
 }
 
@@ -659,7 +665,7 @@ mod tests {
         assert!(cfg.modules.load.is_empty());
         assert_eq!((cfg.firmware, cfg.wlan, cfg.update), (None, None, None), "a phone may have none of them");
         assert_eq!(cfg.logd, None, "a recovery's own logd usually has all it needs");
-        assert_eq!(cfg.recovery, Recovery { partition: "recovery".into(), shares_boot_ramdisk: false }, "a phone keeps its recovery in a partition of its own unless told otherwise");
+        assert_eq!(cfg.recovery, Recovery { partition: "recovery".into(), shares_boot_ramdisk: false, root_adb: false }, "a phone keeps its recovery in a partition of its own, with its own properties, unless told otherwise");
     }
 
     #[test]
@@ -677,6 +683,16 @@ mod tests {
         let haptics = cfg.haptics.expect("the 13 Ultra has a motor");
         assert_eq!((haptics.click, haptics.resonance.as_str()), (Some(0), "/sys/class/qcom-haptics/lra_frequency_hz"));
         assert_eq!(haptics.strength, Strength { lightest: 0.5, strongest: 1.0 });
+    }
+
+    #[test]
+    fn haydn_builds_on_its_boot_image_and_lets_adb_in_as_root() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haydn.toml")).unwrap();
+        assert_eq!(
+            cfg.recovery,
+            Recovery { partition: "boot".into(), shares_boot_ramdisk: true, root_adb: true },
+            "the K40 Pro has no recovery partition, so its recovery is its boot image"
+        );
     }
 
     #[test]
