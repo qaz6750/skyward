@@ -15,8 +15,14 @@ density = 440
 
 # The recovery and the system share one boot image: the phone has no
 # partition of its own for the recovery, and its boot ramdisk carries both
-# the recovery and the first stage of the system. Building on it keeps the
-# phone's own properties as they are, which the system reads as well.
+# the recovery and the first stage of the system. The properties are left as
+# the phone built them, since the system reads them too, and only what lets
+# adb in as root is added to them.
+#
+# The bootloader starts the recovery only when misc asks for it, so entering
+# it takes `fastboot reboot recovery` (or `adb reboot recovery`); the system
+# starts from the same image when nothing asks.
 [recovery]
 partition = "boot"
 shares_boot_ramdisk = true
+root_adb = true
