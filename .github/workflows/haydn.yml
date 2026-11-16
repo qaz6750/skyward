@@ -1,0 +1,113 @@
+name: Haydn
+
+# Builds the K40 Pro's image alone, without waiting for every other device:
+# the boot image that holds Skyward, which is the only image the phone needs
+# to start it. A push that touches nothing this needs builds nothing.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "devices/haydn.toml"
+      - "devices/haydn/**"
+      - "resources/fonts/**"
+      - ".github/workflows/haydn.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  images:
+    name: Build the recovery image for haydn
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Build the recovery service for the phone
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+      # It runs as a second system's first program, before any library is
+      # there to load.
+      - name: Build the second system's first program, static
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward-system-init --target-dir target/system-init
+      - name: Build the packer
+        run: cargo build --locked --release -p skyward-pack
+      # The boot image the recovery is built on, kept beside the
+      # configuration: the phone has no recovery partition, and its own
+      # boot image carries both the recovery and the system's first stage.
+      - name: Take the boot image the recovery is built on
+        run: |
+          mkdir -p stock out
+          gzip -dc devices/haydn/stock.img.gz > stock/boot.img
+      - name: Pack Skyward into the boot image
+        run: |
+          target/release/skyward-pack recovery --stock stock/boot.img \
+            --binary target/aarch64-linux-android/release/skyward \
+            --system-init target/system-init/aarch64-linux-android/release/system-init \
+            --config devices/haydn.toml \
+            --font resources/fonts/MiSansVF.ttf \
+            --mono resources/fonts/KirkMono-Regular.ttf \
+            --mono-license resources/fonts/KirkMono-OFL.txt \
+            --out out/skyward-haydn-boot.img
+      # The phone has no recovery partition: its own boot ramdisk is the
+      # recovery's, so the image is what starts Skyward, not what starts the
+      # system. This is the whole of it; nothing else has to be flashed.
+      - name: Write how to flash it
+        working-directory: out
+        run: |
+          cat > FLASH.txt <<'TXT'
+          skyward-haydn-boot.img is the phone's boot image with Skyward in it.
+
+          It always comes up in Skyward. The ramdisk the phone itself put there
+          is the recovery's: it imports /init.recovery.<hardware>.rc and starts
+          `service recovery` without a condition, and init takes that ramdisk
+          for a recovery's because /system/bin/recovery is in it. Nothing has
+          to ask for it, and there is nothing else to flash.
+
+          The phone keeps two boot slots. Flashing one of them changes nothing
+          while the other one is the slot that starts, which is the likeliest
+          reason a phone went on starting its system after the image went in.
+          Flash both:
+
+            fastboot flash boot_a skyward-haydn-boot.img
+            fastboot flash boot_b skyward-haydn-boot.img
+            fastboot reboot
+
+          Check the slot the phone starts from before flashing:
+
+            fastboot getvar current-slot
+
+          To go back, flash the phone's own boot image into the same two slots.
+
+          What was built and what it hashes to is in SHA256SUMS.
+          TXT
+          cat FLASH.txt
+      - name: Say what was built
+        working-directory: out
+        run: |
+          sha256sum *.img > SHA256SUMS
+          cat SHA256SUMS
+          ls -l
+      # The image is flashed as it is, so it is handed out as it is.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: haydn-images
+          path: |
+            out/skyward-haydn-boot.img
+            out/SHA256SUMS
+            out/FLASH.txt
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
