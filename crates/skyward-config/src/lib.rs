@@ -52,6 +52,9 @@ pub struct DeviceConfig {
     pub touch: Touch,
     #[serde(default)]
     pub partitions: Partitions,
+    /// Where the recovery itself lives.
+    #[serde(default)]
+    pub recovery: Recovery,
     /// Where the firmware the phone's drivers ask for is, on phones whose
     /// recovery leaves it out of their reach.
     #[serde(default)]
@@ -319,6 +322,28 @@ pub struct Touch {
     pub writes: Vec<Write>,
 }
 
+/// Where the recovery itself lives: the partition the bootloader starts it
+/// from, which is a partition of its own on most phones and `boot` on the
+/// ones that pack the recovery and the system into the same ramdisk.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Recovery {
+    /// The partition the bootloader starts the recovery from, without the
+    /// slot it is of.
+    #[serde(default = "default_recovery_partition")]
+    pub partition: String,
+    /// Whether that partition's ramdisk also starts the system, as the one
+    /// boot image of a phone whose recovery lives in `boot` does: what the
+    /// recovery changes for itself the system then reads too.
+    #[serde(default)]
+    pub shares_boot_ramdisk: bool,
+}
+
+impl Default for Recovery {
+    fn default() -> Self {
+        Self { partition: default_recovery_partition(), shares_boot_ramdisk: false }
+    }
+}
+
 /// Partitions as the phone itself mounts them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Partitions {
@@ -472,6 +497,10 @@ fn default_module_sources() -> Vec<String> {
     vec!["vendor_boot".into(), "vendor_dlkm".into(), "vendor".into()]
 }
 
+fn default_recovery_partition() -> String {
+    "recovery".into()
+}
+
 /// The phone a device configuration is for, read on its own: the
 /// configuration a newer build of Skyward carries may hold what this build
 /// does not read.
@@ -515,6 +544,10 @@ impl DeviceConfig {
         }
         for name in &cfg.partitions.mounted {
             ensure!(!name.is_empty() && !name.contains('/'), "[partitions] mounted: {name} is not a partition's name");
+        }
+        {
+            let name = &cfg.recovery.partition;
+            ensure!(!name.is_empty() && !name.contains('/'), "[recovery] partition: {name} is not a partition's name");
         }
         for s in cfg.services.iter().filter(|s| s.oneshot) {
             let waits = s.ready_property.is_some() || s.ready_service.is_some() || s.ready_hardware_service.is_some();
@@ -626,6 +659,7 @@ mod tests {
         assert!(cfg.modules.load.is_empty());
         assert_eq!((cfg.firmware, cfg.wlan, cfg.update), (None, None, None), "a phone may have none of them");
         assert_eq!(cfg.logd, None, "a recovery's own logd usually has all it needs");
+        assert_eq!(cfg.recovery, Recovery { partition: "recovery".into(), shares_boot_ramdisk: false }, "a phone keeps its recovery in a partition of its own unless told otherwise");
     }
 
     #[test]
