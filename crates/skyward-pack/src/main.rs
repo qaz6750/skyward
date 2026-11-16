@@ -44,8 +44,10 @@ enum Cmd {
     /// service becomes Skyward. The image fills the whole partition and ends
     /// in an unsigned AVB footer of its own.
     Recovery {
-        /// The device's stock recovery image: the whole partition, as the
-        /// phone or a full update package holds it, ending in its AVB footer.
+        /// The device's stock image of the partition the recovery lives in:
+        /// the whole partition, as the phone or a full update package holds
+        /// it, ending in its AVB footer. That is `recovery` on most phones
+        /// and `boot` on the ones whose recovery is their boot image.
         #[arg(long)]
         stock: PathBuf,
         /// Skyward built for the device (aarch64-linux-android).
@@ -110,14 +112,15 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::List { image } => list(&image),
         Cmd::Cat { image, path } => {
-            let rd = Ramdisk::decode(&BootImage::read(&image)?.ramdisk)?;
+            let rd = Ramdisk::decode_any(&BootImage::read(&image)?.ramdisk)?.0;
             let e = rd.find(&path).with_context(|| format!("{path} is not in the ramdisk"))?;
             std::io::stdout().write_all(&e.data)?;
             Ok(())
         }
         Cmd::Repack { image, out } => {
             let mut img = BootImage::read(&image)?;
-            img.ramdisk = Ramdisk::decode(&img.ramdisk)?.encode()?;
+            let (rd, compression) = Ramdisk::decode_any(&img.ramdisk)?;
+            img.ramdisk = rd.encode_as(compression)?;
             write(&out, &img, &img.to_bytes()?)
         }
         Cmd::Boot { kernel, ramdisk, out } => {
@@ -127,15 +130,15 @@ fn main() -> Result<()> {
         }
         Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
             let size = partition_size(&stock)?;
+            let cfg = skyward_config::DeviceConfig::load(&config)?;
             let mut img = BootImage::read(&stock)?;
-            let mut rd = Ramdisk::decode(&img.ramdisk)?;
+            let (mut rd, compression) = Ramdisk::decode_any(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
             // on top of another custom recovery.
             if let Some(e) = rd.entries.iter().find(|e| e.name == "FFiles" || e.name.starts_with("twres")) {
                 anyhow::bail!("{} holds {}, which is not a stock recovery", stock.display(), e.name);
             }
             let read = |p: &PathBuf| std::fs::read(p).with_context(|| format!("read {}", p.display()));
-            skyward_config::DeviceConfig::load(&config)?;
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             // Install scripts look for the commands a stock recovery lacks
             // among its programs, and its unzip there too, a link to ziptool
@@ -160,17 +163,22 @@ fn main() -> Result<()> {
             // 0; init lets a later line of a property file override an earlier
             // one. update_engine refuses a package built before the recovery
             // itself unless both of the last two are set; the recovery checks
-            // packages against the installed system instead.
-            let stock_props = &rd
-                .find(paths::PROP_DEFAULT)
-                .with_context(|| format!("{} is not in the ramdisk", paths::PROP_DEFAULT))?
-                .data;
-            let mut props = without(stock_props, &BUILD_VERSION);
-            props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
-            rd.replace(paths::PROP_DEFAULT, props)?;
-            img.ramdisk = rd.encode()?;
+            // packages against the installed system instead. A ramdisk that
+            // starts the system as well is left as the phone built it: its
+            // properties are the system's too, and changing them would change
+            // how the system it boots behaves.
+            if !cfg.recovery.shares_boot_ramdisk {
+                let stock_props = &rd
+                    .find(paths::PROP_DEFAULT)
+                    .with_context(|| format!("{} is not in the ramdisk", paths::PROP_DEFAULT))?
+                    .data;
+                let mut props = without(stock_props, &BUILD_VERSION);
+                props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
+                rd.replace(paths::PROP_DEFAULT, props)?;
+            }
+            img.ramdisk = rd.encode_as(compression)?;
             let bytes = img.to_bytes()?;
-            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
+            write(&out, &img, &avb::footed(&bytes, &cfg.recovery.partition, size, &Sha256::digest(&bytes))?)
         }
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
@@ -293,7 +301,14 @@ fn list(image: &Path) -> Result<()> {
     if img.ramdisk.is_empty() {
         return Ok(());
     }
-    let rd = Ramdisk::decode(&img.ramdisk)?;
+    let (rd, compression) = Ramdisk::decode_any(&img.ramdisk)?;
+    println!(
+        "ramdisk packed as {}",
+        match compression {
+            skyward_bootimg::Compression::Lz4Legacy => "lz4",
+            skyward_bootimg::Compression::Gzip => "gzip",
+        }
+    );
     for e in &rd.entries {
         println!("{:06o} {:>5}:{:<5} {:>10}  {}", e.mode, e.uid, e.gid, e.data.len(), e.name);
     }
